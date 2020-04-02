@@ -27,6 +27,7 @@
 #include "walk.hpp"
 #include "static_comp.hpp"
 
+// workdata
 struct Node2vecState
 {
     vertex_id_t previous_vertex;
