@@ -79,8 +79,8 @@ struct AdjList
 template<typename edge_data_t>
 struct EdgeContainer
 {
-    AdjList<edge_data_t> *adj_lists;
-    AdjUnit<edge_data_t> *adj_units;
+    AdjList<edge_data_t> *adj_lists;   // 存储顶点的边索引
+    AdjUnit<edge_data_t> *adj_units;   // 存储所有的边
     EdgeContainer() : adj_lists(nullptr), adj_units(nullptr) {}
     ~EdgeContainer()
     {
@@ -104,7 +104,7 @@ template<typename T>
 class Message
 {
 public:
-    vertex_id_t dst_vertex_id;
+    vertex_id_t dst_vertex_id;  // 通过该顶点所属partition，将消息发送给对应partition节点处理
     T data;
 };
 
@@ -112,6 +112,10 @@ struct DistributedExecutionCtx
 {
     std::mutex phase_locks[DISTRIBUTEDEXECUTIONCTX_PHASENUM];
     int unlocked_phase;
+    // 一个线程中的msgs, 按照msgs所属partition将msgs放到partition的msg_send_buffer中，
+    // 然后线程通过progress记录此时每个partition的msg_send_buffer中当前已包含的消息个数
+    // progress：二维数组，progress[t_i][part_id] 线程t_i记录t_i将消息flush完后，
+    // 第part_id个partition的msg_send_buffer中消息个数。
     size_t **progress;
 public:
     DistributedExecutionCtx()
@@ -141,9 +145,9 @@ protected:
     partition_id_t local_partition_id;
     partition_id_t partition_num;
 
-    MessageBuffer **thread_local_msg_buffer; 
-    MessageBuffer **msg_send_buffer;
-    MessageBuffer **msg_recv_buffer;
+    MessageBuffer **thread_local_msg_buffer;  // 每个work线程的buffer， 大小：work_num
+    MessageBuffer **msg_send_buffer;          // 每个partition发送的buffer， 大小：partition_num
+    MessageBuffer **msg_recv_buffer;          // 每个partition接收的buffer，其它节点发给该partition的消息都会存在一起。
     std::mutex *send_locks;
     std::mutex *recv_locks;
 
@@ -153,7 +157,7 @@ public:
     vertex_id_t *vertex_out_degree;
     partition_id_t *vertex_partition_id;
 
-    EdgeContainer<edge_data_t> *csr;
+    EdgeContainer<edge_data_t> *csr;  // 存储出边
 
 protected:
     void set_graph_engine_concurrency(int worker_num_param)
@@ -162,7 +166,7 @@ protected:
         omp_set_dynamic(0);
         omp_set_num_threads(worker_num);
         //message buffer depends on worker number
-        free_msg_buffer();
+        free_msg_buffer();  // TODO: ?
     }
 
 public:
@@ -308,8 +312,8 @@ public:
 
     void build_edge_container(Edge<edge_data_t> *edges, edge_id_t local_edge_num, EdgeContainer<edge_data_t> *ec, vertex_id_t* vertex_out_degree)
     {
-        ec->adj_lists = new AdjList<edge_data_t>[v_num];
-        ec->adj_units = new AdjUnit<edge_data_t>[local_edge_num];
+        ec->adj_lists = new AdjList<edge_data_t>[v_num];  // 相当于index，记录每个顶点的出边范围
+        ec->adj_units = new AdjUnit<edge_data_t>[local_edge_num];  // 存储本地的vertex所有出边
         edge_id_t chunk_edge_idx = 0;
         for (vertex_id_t v_i = vertex_partition_begin[local_partition_id]; v_i < vertex_partition_end[local_partition_id]; v_i++)
         {
@@ -334,7 +338,7 @@ public:
         std::vector<edge_id_t> e_count(partition_num, 0);
         for (edge_id_t e_i = 0; e_i < misc_e_num; e_i++)
         {
-            e_count[vertex_partition_id[misc_edges[e_i].src]]++;
+            e_count[vertex_partition_id[misc_edges[e_i].src]]++;   // 每个partition包含的边数
         }
         Edge<edge_data_t> *tmp_es  = new Edge<edge_data_t>[misc_e_num];
         std::vector<edge_id_t> e_p(partition_num, 0);
@@ -458,6 +462,7 @@ public:
         }
         MPI_Allreduce(local_vertex_degree.data(),  vertex_in_degree, v_num, get_mpi_data_type<vertex_id_t>(), MPI_SUM, MPI_COMM_WORLD);
 
+        // 顶点进行分区，确定每个计算节点负责的顶点范围
         vertex_partition_begin = new vertex_id_t[partition_num];
         vertex_partition_end = new vertex_id_t[partition_num];
         edge_id_t total_workload = 0;
@@ -467,7 +472,7 @@ public:
             total_workload += 5 + vertex_out_degree[v_i];
             e_num += vertex_out_degree[v_i];
         }
-        edge_id_t workload_per_node = (total_workload + partition_num - 1) / partition_num;
+        edge_id_t workload_per_node = (total_workload + partition_num - 1) / partition_num; // TODO(?): ??
         for (partition_id_t p_i = 0; p_i < partition_num; p_i++)
         {
             if (p_i == 0)
@@ -537,6 +542,7 @@ public:
             #pragma omp parallel
             {
                 int worker_id = omp_get_thread_num();
+                // TODO: 一个线程的msg满之和，会根据msg_t中dst_id所属partition将msg flush到对应partition的msg_send_buffer中
                 thread_local_msg_buffer[worker_id] = new MessageBuffer();
             }
         }
@@ -608,9 +614,11 @@ public:
         }
     }
 
+    // 产生消息，消息最终存储到dst_id对应的partition msg_send_buffer中
     template<typename msg_data_t>
-    void emit(vertex_id_t dst_id, msg_data_t data, int worker_id)
+    void emit(vertex_id_t dst_id, msg_data_t data, int worker_id)// TODO(?): work_id -> thread_id
     {
+        // 初始化每个thread的msg
         typedef Message<msg_data_t> msg_t;
         msg_t* buf_data = (msg_t*)thread_local_msg_buffer[worker_id]->data;
         auto &count = thread_local_msg_buffer[worker_id]->count;
@@ -634,6 +642,7 @@ public:
         emit(dst_id, data, omp_get_thread_num());
     }
 
+    // 将worker_id线程产生的msg, flush到msg_send_buffer中
     template<typename msg_t>
     void flush_thread_local_msg_buffer(partition_id_t worker_id)
     {
@@ -642,10 +651,12 @@ public:
         auto &local_msg_count = local_buf->count;
         if (local_msg_count != 0)
         {
+            // 统计每个msg_send_buffer[partition]中会接收几个msg
             vertex_id_t dst_count[partition_num];
             std::fill(dst_count, dst_count + partition_num, 0);
             for (vertex_id_t m_i = 0; m_i < local_msg_count; m_i++)
             {
+                // 根据msg中dst_vertex_id顶点所属partition，统计每个partition将要接收多少个msg
                 dst_count[vertex_partition_id[local_data[m_i].dst_vertex_id]] ++;
             }
             msg_t *dst_data_pos[partition_num];
@@ -701,6 +712,12 @@ public:
         }
     }
 
+    // 分布式执行：
+    // msg_producer: 产生msg
+    // msg_consumer: 处理接收到的消息，每个节点发来消息会存在msg_recv_buffer[paritition]，
+    // 收集完所有消息后，对msg_recv_buffer[partition]调用msg_consumer，且只调一次。
+    // zero_copy_data: 如果不为空，则将接收到的消息使用zero_copy_data来存储，
+    // 将msg_producer产生的msg，根据msg信息将消息发送给对应的计算节点。
     template<typename msg_data_t>
     size_t distributed_execute(
         std::function<void(void)> msg_producer,
@@ -715,6 +732,8 @@ public:
         int phase_num = phased_exec ? DISTRIBUTEDEXECUTIONCTX_PHASENUM : 1;
         for (int phase_i = 0; phase_i < phase_num; phase_i++)
         {
+            // 上锁，在msg_producer操作中会解锁，一个phase_i阶段的内容填满后，才会进行解锁
+            // 解锁完后，send_thread可以进行发送。msg_producer如果没有解锁完，那么msg_producer之后，主线程会解锁。
             dist_exec_ctx.phase_locks[phase_i].lock();
         }
         for (partition_id_t t_i = 0; t_i < worker_num; t_i++)
@@ -727,9 +746,13 @@ public:
         dist_exec_ctx.unlocked_phase = 0;
         for (partition_id_t p_i = 0; p_i < partition_num; p_i++)
         {
+            // 解锁动作在recv_thread中操作，一个partition上所有消息都接收到后才解锁
+            // 解锁成功后，消息消费者才可以进行消费操作（在主线程中，一开始会通过lock阻塞，直到有partition消息已经接收完）
             recv_locks[p_i].lock();
         }
         volatile size_t zero_copy_recv_count = 0;
+
+        // 接收线程：
         std::thread recv_thread([&](){
             for (partition_id_t p_i = 0; p_i < partition_num; p_i++)
             {
@@ -760,6 +783,7 @@ public:
             {
                 if (phase_i + 1 == phase_num)
                 {
+                    // 最后阶段，逐个接收每个partition发来的消息
                     for (partition_id_t step = 0; step < partition_num; step++)
                     {
                         partition_id_t src = (partition_num + local_partition_id - step) % partition_num;
@@ -768,6 +792,7 @@ public:
                     }
                 } else
                 {
+                    // 分阶段时，每个阶段只接收一个partition发来的数据
                     partition_id_t src = (partition_num + local_partition_id - phase_i % partition_num) % partition_num;
                     recv_func(src);
                 }
@@ -780,6 +805,7 @@ public:
             }
         });
 
+        // 发送线程：
         std::thread send_thread([&](){
             size_t send_progress[partition_num];
             for (partition_id_t p_i = 0; p_i < partition_num; p_i++)
@@ -801,11 +827,12 @@ public:
 #endif
                 send_progress[dst] += diff;
             };
+            // 将每个partition包含的消息分阶段发送出去，即一个partition的消息会分批次发出去
             for (int phase_i = 0; phase_i < phase_num; phase_i++)
             {
                 dist_exec_ctx.phase_locks[phase_i].lock();
                 if (phase_i + 1 == phase_num)
-                {
+                { // 最后一批次，将每个partition中剩余的所有信息都发送出去
                     for (partition_id_t step = 0; step < partition_num; step++)
                     {
                         partition_id_t dst = (local_partition_id + step) % partition_num;
@@ -823,6 +850,7 @@ public:
                     }
                 } else
                 {
+                    // 只发送一个partition中一个thread产生的消息
                     partition_id_t dst = (local_partition_id + phase_i) % partition_num;
                     size_t min_progress = UINT_MAX;
                     for (partition_id_t t_i = 0; t_i < worker_num; t_i++)
@@ -840,6 +868,7 @@ public:
             }
             for (partition_id_t p_i = 0; p_i < partition_num; p_i++)
             {
+                // 待发送消息为0
                 msg_send_buffer[p_i]->count = 0;
             }
             for (auto req : requests)
@@ -850,6 +879,7 @@ public:
             }
         });
 
+        // 产生消息
         msg_producer();
 
         size_t flush_workload = 0;
@@ -860,9 +890,12 @@ public:
 #pragma omp parallel for if (flush_workload * 2 >= OMP_PARALLEL_THRESHOLD)
         for (partition_id_t t_i = 0; t_i < worker_num; t_i++)
         {
+            // 将每个线程中的消息flush到send_msg_buffer中
             flush_thread_local_msg_buffer<msg_t>(t_i);
         }
 
+        // 将未解锁的phase进行解锁，
+        // TODO(待优化）：可以等待发送完一个partition后就立即解锁一个，而不是等到所有都发送完。
         for (int phase_i = dist_exec_ctx.unlocked_phase; phase_i < phase_num; phase_i++)
         {
             dist_exec_ctx.phase_locks[phase_i].unlock();
@@ -874,10 +907,12 @@ public:
         }
 #endif
 
+        // 消费接收到的msg
         size_t msg_num = 0;
         for (int step = 0; step < partition_num; step++)
         {
             partition_id_t src_partition_id = (partition_num + local_partition_id - step) % partition_num;
+            // TODO(优化)：等到上面recv_thread线程接收完后才可以进行处理，此处可以优化。
             recv_locks[src_partition_id].lock();
             if (zero_copy_data == nullptr)
             {

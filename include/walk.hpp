@@ -52,14 +52,15 @@ public:
 template<typename edge_data_t>
 struct AliasBucket
 {
-    real_t p;
-    AdjUnit<edge_data_t> *p_ptr, *q_ptr;
+    real_t p;                            // 一个概率值（引擎提供），如果p_ptr的概率值大于该值，则取其。否则取q_ptr.
+    AdjUnit<edge_data_t> *p_ptr, *q_ptr; // 每个bucket最多2个边，如果只有一条边，则q_ptr为null
 };
 
 template<typename edge_data_t>
 struct AliasTableContainer
 {
-    AliasBucket<edge_data_t> *buckets;
+    AliasBucket<edge_data_t> *buckets;  //数组大小：local edge边个数（master顶点边个数）
+    // 二维数组大小：v_num, 只有local master顶点有值，存储每个顶点的bucket在buckets中的开始(p_ptr)和结束(q_ptr)位置
     AliasBucket<edge_data_t> **index;
     AliasTableContainer() : buckets(nullptr), index(nullptr) {}
     ~AliasTableContainer()
@@ -71,7 +72,7 @@ template <typename query_data_t>
 struct stateQuery
 {
     vertex_id_t src_v;
-    walker_id_t walker_idx;
+    walker_id_t walker_idx;  // work id
     query_data_t data;
 };
 
@@ -97,7 +98,7 @@ template<typename edge_data_t>
 struct SecondOrderCandidate
 {
     AdjUnit<edge_data_t> *candidate;
-    real_t randval;
+    real_t randval;   // TODO(?): ?
     bool accepted;
 };
 
@@ -106,12 +107,12 @@ class WalkConfig
 {
 public:
     // output setting
-    bool output_file_flag;
+    bool output_file_flag;  // 输出
     std::string output_path_prefix;
     bool print_with_head_info;
     bool output_consumer_flag;
-    std::function<void (PathSet*)> output_consumer_func;
-    double rate;
+    std::function<void (PathSet*)> output_consumer_func; // 输出函数
+    double rate;         // TODO(?) : ？
 
     WalkConfig()
     {
@@ -150,9 +151,9 @@ class WalkerConfig
 public:
     // walker setting
     walker_id_t walker_num;
-    std::function<vertex_id_t (walker_id_t)> walker_init_dist_func;
-    std::function<void (Walker<walker_data_t>&, vertex_id_t)> walker_init_state_func;
-    std::function<void (Walker<walker_data_t>&, vertex_id_t, AdjUnit<edge_data_t> *)> walker_update_state_func;
+    std::function<vertex_id_t (walker_id_t)> walker_init_dist_func; // 初始化开始顶点
+    std::function<void (Walker<walker_data_t>&, vertex_id_t)> walker_init_state_func;  // 初始化walker状态
+    std::function<void (Walker<walker_data_t>&, vertex_id_t, AdjUnit<edge_data_t> *)> walker_update_state_func; // 更新walker状态
 
     WalkerConfig()
     {
@@ -400,6 +401,7 @@ public:
         return &randgen[omp_get_thread_num()];
     }
 
+    // TODO(?)： ？
     std::function<vertex_id_t (walker_id_t)> get_equal_dist_func()
     {
         auto equal_dist_func = [&] (walker_id_t w_id)
@@ -420,6 +422,7 @@ public:
         return uniform_dist_func;
     }
 
+    // 用户的编程接口
     template<typename transition_config_t>
     void random_walk(WalkerConfig<edge_data_t, walker_data_t> *walker_config, transition_config_t *transition_config, WalkConfig *walk_config_param = nullptr)
     {
@@ -437,6 +440,7 @@ public:
 
 private:
 
+    // 初始化work状态
     walker_id_t init_walkers(
         Message<Walker<walker_data_t> >* &local_walkers,
         Message<Walker<walker_data_t> >* &local_walkers_bak,
@@ -460,23 +464,25 @@ private:
                     {
                         continue;
                     }
+                    // walker的开始顶点
                     vertex_id_t start_v = walker_init_dist_func(w_i);
                     Walker<walker_data_t> walker;
                     walker.id = w_i;
                     walker.step = 0;
                     assert(start_v < this->v_num);
+                    // 产生msg
                     this->emit(start_v, walker, omp_get_thread_num());
                 #ifdef COLLECT_WALK_SEQUENCE
                     footprints[omp_get_thread_num()].push_back(Footprint(walker.id, start_v, walker.step));
                 #endif
                 }
-            },
+            }, // 产生msg
             [&](walker_msg_t *begin, walker_msg_t *end)
             {
                 local_walker_num = end - begin;
                 std::swap(local_walkers, local_walkers_bak);
-            },
-            local_walkers_bak
+            }, // 处理接收到的msg
+            local_walkers_bak  // 接收发过来的msg
         );
         if (walker_init_state_func != nullptr)
         {
@@ -496,6 +502,7 @@ private:
         return local_walker_num;
     }
 
+    // 初始化顶点的upperbound值
     void init_dcomp_upperbound(std::function<real_t(vertex_id_t, AdjList<edge_data_t>*)> dcomp_upperbound_func, real_t* &dcomp_upperbound)
     {
         assert(dcomp_upperbound == nullptr);
@@ -516,6 +523,7 @@ private:
         this->dealloc_vertex_array(dcomp_upperbound);
     }
 
+    // 使用dcomp_lowerbound_func函数初始化dcomp_lowerbound：每个顶点的lowerbound
     void init_dcomp_lowerbound(std::function<real_t(vertex_id_t, AdjList<edge_data_t>*)> dcomp_lowerbound_func, real_t* &dcomp_lowerbound)
     {
         assert(dcomp_lowerbound == nullptr);
@@ -535,6 +543,7 @@ private:
         this->dealloc_vertex_array(dcomp_lowerbound);
     }
 
+    // 初始化alias_tables
     void init_alias_tables(std::function<real_t(vertex_id_t, AdjUnit<edge_data_t>*)> static_comp_func, AliasTableContainer<edge_data_t> *&alias_tables, real_t* regular_area = nullptr)
     {
         assert(static_comp_func != nullptr);
@@ -546,13 +555,16 @@ private:
         if (alias_tables == nullptr)
         {
             alias_tables = new AliasTableContainer<edge_data_t>();
+            // 每个master顶点包含的buckets范围
             alias_tables->index = this->template alloc_vertex_array<AliasBucket<edge_data_t>*>();
+            // buckets数组大小等于local edge个数
             alias_tables->buckets = this->template alloc_array<AliasBucket<edge_data_t> >(this->local_e_num);
         }
         edge_id_t local_edge_p = 0;
         vertex_id_t max_degree = 0;
         for (vertex_id_t v_i = local_v_begin; v_i != local_v_end; v_i++)
         {
+            // 设置每个顶点的开始bucket位置
             alias_tables->index[v_i] = alias_tables->buckets + local_edge_p;
             local_edge_p += this->vertex_out_degree[v_i];
             max_degree = std::max(max_degree, this->vertex_out_degree[v_i]);
@@ -565,7 +577,7 @@ private:
             vertex_id_t next_workload;
             vertex_id_t *p_set = new vertex_id_t[max_degree];
             vertex_id_t *q_set = new vertex_id_t[max_degree];
-            real_t *prob = new real_t[max_degree];
+            real_t *prob = new real_t[max_degree];// 每条边的概率
             while((next_workload =  __sync_fetch_and_add(&progress, work_step_length)) < local_v_end)
             {
                 vertex_id_t v_begin = next_workload;
@@ -582,10 +594,12 @@ private:
                             prob[e_i] = static_comp_func(v_i, begin + e_i); 
                             sum += prob[e_i];
                         }
+                        // ITS方法涉及的边概率之和
                         if (regular_area != nullptr)
                         {
                             regular_area[v_i] = sum;
                         }
+                        // 每个bucket中的概率之和等于ave_prob
                         real_t ave_prob = sum / this->vertex_out_degree[v_i];
                         vertex_id_t p_set_head = 0;
                         vertex_id_t p_set_tail = 0;
@@ -609,6 +623,7 @@ private:
                             {
                                 vertex_id_t q_idx = q_set[q_set_head++];
                                 alias_p->p_ptr = begin + p_idx;
+                                // 边的概率/平均概率
                                 alias_p->p = prob[p_idx] / ave_prob;
                                 alias_p->q_ptr = begin + q_idx;
                                 real_t diff = ave_prob - prob[p_idx];
@@ -677,21 +692,26 @@ public:
         Timer timer;
 
         AliasTableContainer<edge_data_t>* alias_tables;
+        // 数组大小：v_num, 使用transition_config->dcomp_lowerbound_func函数为当前node中的每个master顶点设置lowerbound值
         real_t *dcomp_lowerbound;
+        // 数组大小：v_num, 使用transition_config->dcomp_upperbound_func函数为当前node中的每个master顶点设置upperbound值
         real_t *dcomp_upperbound;
+        // 是否有优化措施
         bool outlier_opt_flag;
+        // 大小为：v_num，只有local master有数据，论文图3中记录每个顶点的矩形面积：Q(v)*(Ps(e)之和)，而不是每个柱子的面积
+        // 打靶区域
         real_t *regular_area;
 
         response_t* remote_response_cache;
         SecondOrderCandidate<edge_data_t>* remote_fetch_candidate;
         Message<query_t>* cached_request;
 
-        walker_msg_t *local_walkers;
-        walker_msg_t *local_walkers_bak;
-        walker_id_t local_walker_num;
-        walker_id_t active_walker_num;
+        walker_msg_t *local_walkers;   // 当前运行work的msg
+        walker_msg_t *local_walkers_bak;  // TODO(?): ???
+        walker_id_t local_walker_num;   // 当前运行的work数量
+        walker_id_t active_walker_num;  // 可最多运行的work数量
 
-        bool collect_path_flag;
+        bool collect_path_flag; // 是否收集路径标识
         PathCollector *pc;
     };
 
@@ -703,7 +723,9 @@ public:
         typedef stateQuery<query_data_t> query_t;
         typedef stateResponse<response_data_t> response_t;
 
+        // 总共的walker数
         walker_id_t walker_num = walker_config->walker_num;
+        // 每轮执行的walker数，walker可能会分成多批执行。
         walker_id_t walker_per_iter = walker_num * walk_config->rate;
         if (walker_per_iter == 0) walker_per_iter = 1;
         if (walker_per_iter > walker_num) walker_per_iter = walker_num;
@@ -724,11 +746,15 @@ public:
         {
             walk_data.outlier_opt_flag = true;
         }
-
+        // 存储响应的消息
         walk_data.remote_response_cache = nullptr;
+        // 在dynamic random walk下，用Rejection sampling方式,在确定x坐标情况下,判断该边dst是否备接受，需要计算得到他的Dy值，
+        // 这个Dy值需要确定dst和walk的上一个节点t的距离关系，此时产生一个query请求到t对应的节点上，
+        // 此处dst作为candidate，等待query的结果：Dy值。TODO:（后面叙述不太对）
         walk_data.remote_fetch_candidate = nullptr;
+        // 存储请求，发送给其他节点的请求
         walk_data.cached_request = nullptr;
-        if (order == 2)
+        if (order == 2) // 只有dynamic才需要发送消息给其他节点（候选边是否应该被选中，需要把候选边发送给work的previous个顶点来确认）
         {
             walk_data.remote_response_cache = this->template alloc_array<response_t>(walker_array_size);
             walk_data.remote_fetch_candidate = this->template alloc_array<SecondOrderCandidate<edge_data_t> >(walker_array_size);
@@ -744,15 +770,18 @@ public:
         walk_data.dcomp_lowerbound = nullptr;
         if (transition_config->dcomp_lowerbound_func != nullptr)
         {
+            // 使用dcomp_lowerbound_func函数初始化dcomp_lowerbound：每个顶点的lowerbound
             init_dcomp_lowerbound(transition_config->dcomp_lowerbound_func, walk_data.dcomp_lowerbound);
         }
 
         walk_data.regular_area = nullptr;
         if (walk_data.outlier_opt_flag)
         {
+            // 优化之一
             walk_data.regular_area = this->template alloc_vertex_array<real_t>();
         }
         walk_data.alias_tables = nullptr;
+        // 静态采样
         if (transition_config->static_comp_func != nullptr)
         {
             init_alias_tables(transition_config->static_comp_func, walk_data.alias_tables, walk_data.regular_area); 
@@ -763,6 +792,7 @@ public:
 #pragma omp parallel for
                 for (vertex_id_t v_i = local_v_begin; v_i < local_v_end; v_i++)
                 {
+                    // TODO: 论文图3中整个矩形的面积
                     walk_data.regular_area[v_i] *= walk_data.dcomp_upperbound[v_i];
                 }
             }
@@ -784,6 +814,7 @@ public:
         {
             walker_config->walker_init_dist_func = this->get_equal_dist_func();
         }
+        // TODO: 每轮运行的walker，每个walker对应一个Message
         walk_data.local_walkers = this->template alloc_array<Message<Walker<walker_data_t> > >(walker_array_size);
         walk_data.local_walkers_bak = this->template alloc_array<Message<Walker<walker_data_t> > >(walker_array_size);
 
@@ -795,21 +826,26 @@ public:
         {
             max_msg_size = std::max(sizeof(walker_msg_t), std::max(sizeof(Message<query_t>), sizeof(Message<response_t>)));
         }
+        // 设置全局的msg buffer
         this->set_msg_buffer(walker_array_size, max_msg_size);
 
 #ifdef COLLECT_WALK_SEQUENCE
         footprints.resize(this->worker_num);
 #endif
         int iter = 0;
-        while (remained_walker != 0)
+        while (remained_walker != 0) // work_num，分批次执行walker
         {
             if (walk_data.collect_path_flag)
             {
                 walk_data.pc = new PathCollector(this->worker_num);
             }
+            // 即将运行的第一个work编号
             walker_id_t walker_begin = walker_num - remained_walker;
+            // 本轮运行的全局walker数量
             walk_data.active_walker_num = std::min(remained_walker, walker_per_iter);
+            // 剩下待运行的walker数量
             remained_walker -= walk_data.active_walker_num;
+            // 在当前节点上运行的walker数量：local_walker_num
             walk_data.local_walker_num = init_walkers(walk_data.local_walkers, walk_data.local_walkers_bak, walker_begin, walker_begin + walk_data.active_walker_num, walker_config->walker_init_dist_func, walker_config->walker_init_state_func);
 
             if (walk_data.collect_path_flag)
@@ -1179,7 +1215,7 @@ public:
                                             vertex_id_t degree = this->vertex_out_degree[current_v];
                                             bool in_appendix_area = false;
                                             if (outlier_opt_flag)
-                                            {
+                                            { // TODO(待搞懂):
                                                 real_t outlier_overflow_upperbound;
                                                 vertex_id_t outlier_num_upperbound;
                                                 outlier_upperbound_func(p->data, current_v, adj, outlier_overflow_upperbound, outlier_num_upperbound);
@@ -1340,9 +1376,9 @@ public:
                             for (walker_msg_t *p = begin; p != end; p++)
                             {
                                 walker_t& walker = p->data;
-                                vertex_id_t current_v = p->dst_vertex_id;
+                                vertex_id_t current_v = p->dst_vertex_id; //b
                                 walker_id_t walker_idx = p - local_walkers;
-                                auto *cd = &remote_fetch_candidate[walker_idx];
+                                auto *cd = &remote_fetch_candidate[walker_idx];//b-c
                                 if (cd->candidate != nullptr)
                                 {
                                     if (cd->accepted || cd->randval <= dynamic_comp_func(walker, remote_response_cache[walker_idx], current_v, cd->candidate))

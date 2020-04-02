@@ -93,11 +93,11 @@ public:
 class MessageBuffer
 {
     char padding[L1_CACHE_LINE_SIZE - sizeof(size_t) - sizeof(bool) - sizeof(vertex_id_t) - sizeof(void*)];
-    bool is_private_data;
+    bool is_private_data;  // TODO(?): 当前node产生的，还是其它node发来的？
 public:
-    size_t sz;
-    size_t count;
-    void *data;
+    size_t sz;   // buffer容量
+    size_t count; // 已包含的数据量
+    void *data;  // 数据区域
     MessageBuffer()
     {
         sz = 0;
